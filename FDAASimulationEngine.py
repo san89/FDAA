@@ -7,27 +7,50 @@ authors: Joep van den Bogaert
 
 date: June 25, 2018
 """
+import numpy as np
+import pandas as pd
 
 class SimulationEngine():
     """ Main class to simulate incidents and responses. """
     
-    def __init__(self, mean_interarrival_time, location_probs, demand_locations, decision_agent, 
-                 demand_location_definition="postcode_digits"):
+    def __init__(self, demand_location_definition="postcode_digits", verbose=True):
 
         self.time = 0
-        self.L = mean_interarrival_time
-        self.location_probs = location_probs
-        self.demand_locations = demand_locations
-        self.agent = decision_agent
         self.demand_location_definition = demand_location_definition
+        self.verbose = verbose
 
-    
-    def fit_incident_parameters(self, incident_log, deployment_log, verbose=True):
+
+    def fit_incident_parameters(self, incident_log, deployment_log, time_of_day_filter=None, filter_demo_incidents=True):
         """ Calculates the parameter values required for simulation from the raw data
-            and stores them in the desired formats. 
+            and stores them in the desired formats.
+
         :param incident_log: Pandas DataFrame with incident data.
-        :param deployment_log: Pandas DataFrame with deployment data. 
+        :param deployment_log: Pdandas DataFrame with deployment data.
+        :param time_of_day_filter: tuple of two integers from 0 to 23 representing the start
+                                       and end hour of the day to take into account.
+        :param verbose: if true, print status updates. 
         """
+
+        def calculate_interarrival_times(incident_data, time_in="minutes"):
+            """ Calculate the mean time between consecutive incidents.
+
+            :param incident_data: Pandas DataFrame with the incident data.
+            :param time_in: String, one of ["seconds", "minutes"], unit to return the value in.
+            :return: mean interarrival time.
+            """
+
+            incident_data["dim_incident_start_datumtijd"] = pd.to_datetime(incident_data["dim_incident_start_datumtijd"])
+            incident_data.sort_values("dim_incident_start_datumtijd", ascending=True, inplace=True)
+
+            if time_in == "minutes":
+                incident_data["interarrival_time"] = incident_data["dim_incident_start_datumtijd"].diff().dt.seconds / 60
+            elif time_in == "seconds":
+                incident_data["interarrival_time"] = incident_data["dim_incident_start_datumtijd"].diff().dt.seconds
+            else:
+                ValueError("time_in must be one of ['seconds', 'minutes']")
+
+            return incident_data["interarrival_time"]
+
 
         def get_prob_per_demand_location(incident_data, location="postcode_digits"):
             """ Calculate the proportion of incidents that happens in every demand location. 
@@ -38,8 +61,7 @@ class SimulationEngine():
             """
 
             if location=="postcode_digits":
-                incident_data = incident_data[~incident_data["dim_incident_postcode"].isnull()].copy()
-                incident_data["dim_incident_postcode_digits"] = incident_data["dim_incident_postcode"].str[0:4]
+                incident_data = incident_data[~incident_data["dim_incident_postcode_digits"].isnull()].copy()
                 incident_data.sort_values("dim_incident_postcode_digits", ascending=True, inplace=True)
                 incident_data = incident_data.groupby("dim_incident_postcode_digits") \
                                         ["dim_incident_id"].count() / len(incident_data)
@@ -75,7 +97,7 @@ class SimulationEngine():
                 
                 types = np.array(probs_per_location.index)
                 return {loc : list(probs_per_location[loc]) for loc in probs_per_location.columns}, types
-            
+
 
         def get_prio_probabilities_per_type(incident_data):
             """ Create dictionary with the probabilities of having priority 1, 2, and 3 for 
@@ -122,7 +144,7 @@ class SimulationEngine():
             # retrieve dictionary for each incident type
             types = deployment_data["dim_incident_incident_type"].unique()
             prob_dict = dict()
-            
+
             # loop over types for convenience, may be optimized
             for ty in types:
                 # get information for this incident type
@@ -138,9 +160,35 @@ class SimulationEngine():
 
             return prob_dict
 
+
         def get_response_time_targets(incident_data):
             """ Determine the probability of having a certain respons time target.. """
             pass
+
+
+        # calculate interarrival times and add as column to the data
+        incident_log["interarrival_time"] = calculate_interarrival_times(incident_log, time_in="minutes")
+
+        # filter on specific period of the day if specified
+        if time_of_day_filter is not None:
+                assert(len(time_of_day_filter)==2), "time_of_day_filter must be array-like of length 2, or None."
+                a, b = time_of_day_filter
+                incident_log = incident_log[(incident_log["dim_tijd_uur"]>=a)&(incident_log["dim_tijd_uur"]<b)].copy()
+                if self.verbose:
+                    print("Only considering incidents between {} and {} O'clock.".format(a,b))
+
+        # add demand location identifier if locations are by postcode
+        if self.demand_location_definition == "postcode_digits":
+            incident_log["dim_incident_postcode_digits"] = incident_log["dim_incident_postcode"].str[0:4]
+
+        # filter out demo incidents, i.e., incidents without deployments
+        incidents_before = len(incident_log)
+        incident_log = incident_log[np.isin(incident_log["dim_incident_id"], deployment_log["hub_incident_id"])].copy()
+        if self.verbose:
+            print("{} incident(s) removed because there were no corresponding deployments.".format(incidents_before - len(incident_log)))
+
+        # set the mean interarrival time
+        self.mean_interarrival_time = incident_log["interarrival_time"][1:].mean()
 
         # get the probabilities that an incident occurs in specific demand location
         self.location_probabilities, self.demand_location_ids = \
@@ -153,16 +201,23 @@ class SimulationEngine():
         # get probabilities of having certain vehicle requirements from an incident
         self.vehicle_prob_dict = get_vehicle_requirements_probabilities(incident_log, deployment_log)
 
-        if verbose:
+        if self.verbose:
             print("Incident parameters are obtained from the data.")
         """ End of fit_incident_parameters """
 
+    def fit_deployment_parameters(self):
+        # code of Santiago
+
     def initialize_demand_locations(self):
-        self.demand_locations = {self.demand_location_ids[i] : 
-                                    DemandLocation(self.demand_location_ids[i],
-                                                   self.type_probs_per_location[self.demand_location_ids[i]],
-                                                   self.type_probs_names) \
-                                    for i in range(len(self.demand_location_ids))}
+        self.demand_locations = \
+            {self.demand_location_ids[i] : DemandLocation(self.demand_location_ids[i],
+                                                          self.type_probs_per_location[self.demand_location_ids[i]],
+                                                          self.type_probs_names) \
+                                           for i in range(len(self.demand_location_ids))}
+
+    def set_agent(self, agent):
+        self.agent = agent
+
 
     def return_finished_vehicles(self):
         """ Return vehicles that are finished solving an incident. """
@@ -170,6 +225,18 @@ class SimulationEngine():
 
 
     def generate_incident(self):
+
+
+        def sample_location(locations, probabilities):
+            """ Randomly generate the location of the incident.
+
+            :param locations: array of location names.
+            :param probabilities: array of probabilities for each location
+                                  (same length as locations).
+            :return: string value with location name.
+            """
+            return locations[np.digitize(np.random.sample(), np.cumsum(probabilities))]
+
 
         def sample_deployment_requirements(type_of_incident):
             """ Draw random sample of the priority, the required vehicles, and response time target
@@ -179,34 +246,87 @@ class SimulationEngine():
             :param type_of_incident: string representing the incident type.
             :return: Tuple of (priority, dictionary of {"vehicle type" : number}, response time target)
             """
-            prio = np.random.choice([1,2,3], self.prio_prob_dict[type_of_incident])
-            vehicle_requirements = self.vehicle_prob_dict[type_of_incident] # finish this line
+
+            def sample(d):
+                return np.random.choice(a=list(d.keys()), p=list(d.values()))
+
+            # sample priority
+            prio = np.random.choice(a=[1,2,3], p=self.prio_prob_dict[type_of_incident])
+
+            # sample vehicle requirements
+            # TODO: make safe -> draw again if no vehicles required
+            v = self.vehicle_prob_dict[type_of_incident]
+            vehicle_requirements =  {key : sample(v[key]) for key in v.keys()} # finish this line
+            vehicle_requirements = {k : v for k, v in vehicle_requirements.items() if v > 0}
+            
+            # sample response time target (deterministic for now)
             if prio == 1:
                 response_time_target = 10 # TODO: implement response time targets
             elif prio == 2:
                 response_time_target = 30
             else: 
                 response_time_target = 60
+            
+            # TODO: add incident duration
             return prio, vehicle_requirements, response_time_target
 
-        incident_location_id = np.random.choice(self.demand_location_ids, self.location_probabilities)
+
+        def sample_incident_duration(type_of_incident):
+            """ Randomly generate the duration of the incident.
+
+            :param type_of_incident: string representing the incident type.
+            :return: scalar value, the duration of the incident in minutes. 
+            """
+            # TODO
+            return 20
+
+        incident_location_id = sample_location(self.demand_location_ids, self.location_probabilities)
         incident_type = self.demand_locations[incident_location_id].sample_incident_type()
-        priority, vehicles, response_time_target = self.sample_deployment_requirements(incident_type)
+        priority, vehicles, response_time_target = sample_deployment_requirements(incident_type)
 
-        return Incident(self.time, incident_type, priority, required_vehicles, incident_location_id)
-
-    
-    def get_state(self):
-        pass
+        return Incident(self.time, incident_type, priority, vehicles, incident_location_id)
 
 
     def step(self):
-        
-        self.time = self.time + np.random.exponential(self.L, 1)
+        """ Take one simulation step (one incident). """
+        self.time = float(self.time + np.random.exponential(self.mean_interarrival_time, 1))
+
         self.return_finished_vehicles()
         incident = self.generate_incident()
-        state = self.get_state()
+
+        if self.verbose:
+            print("Time: {}. Incident: {} with priority {} at postcode {}.".format(
+                  self.time, incident.type, incident.priority, incident.location))
+
+        state = ...
         self.agent.deploy(incident, state)
+        #self.agent.relocate(state)
+
+
+    def simulate(self, simulation_time, nr_incidents=None, by_incidents=False):
+        """ Run the simulation. """ 
+        
+        self.reset_time()
+
+        while self.time < simulation_time:
+            self.step()
+
+
+    def reset_time(self):
+        self.time = 0
+
+
+class Incident():
+    """ An incident that requires a response from the fire department: 
+        can be a fire or something else.
+    """
+    
+    def __init__(self, start_time, incident_type, priority, required_vehicles, location):
+        self.start_time = start_time
+        self.type = incident_type
+        self.priority = priority
+        self.required_vehicles = required_vehicles
+        self.location = location
 
 
 class DemandLocation():
@@ -239,19 +359,13 @@ class Agent():
 class FireStation():
     """ Represents a fire station. """
     
-    def __init__(vehicles, location, incident_type_probs):
+    def __init__(vehicles, name, location):
+        self.name
         self.vehicles = vehicles
         self.location = location
-        self.incident_type_probs = incident_type_probs
         
 
-class Incident():
-    """ An incident that requires a response from the fire department: 
-        can be a fire or something else.
-    """
-    
-    def __init__(start_time, incident_type, priority, required_vehicles, location):
-        pass
+
     
 
 class Vehicle():
