@@ -161,9 +161,35 @@ class SimulationEngine():
             return prob_dict
 
 
-        def get_response_time_targets(incident_data):
-            """ Determine the probability of having a certain respons time target.. """
-            pass
+        def get_building_function_probs(incident_data):
+            """ Calculate the probability of an incident occuring in a certain type of building
+                given the demand location and incident type.
+                
+            :param incident_data: Pandas DataFrame with the incident data.
+            :return: nested dictionary like {"location" : {"incident type" : {"building" : prob}}}
+            """
+
+            incident_data["inc_dim_object_functie"] = incident_data["inc_dim_object_functie"].fillna("unknown")
+
+            building_function_probs = incident_data.groupby(["dim_incident_postcode_digits", "dim_incident_incident_type", "inc_dim_object_functie"])\
+                                                   ["dim_incident_id"]\
+                                                   .count()\
+                                                   .reset_index()
+
+            building_function_probs["building_function_probs"] = \
+                                   building_function_probs.groupby(["dim_incident_postcode_digits", "dim_incident_incident_type"])\
+                                   ["dim_incident_id"]\
+                                   .transform(lambda x: x/x.sum())
+
+            building_dict = \
+                building_function_probs.groupby(["dim_incident_postcode_digits", "dim_incident_incident_type"])\
+                                       [["inc_dim_object_functie", "building_function_probs"]]\
+                                       .apply(lambda x: {x["inc_dim_object_functie"].iloc[i] : x["building_function_probs"].iloc[i] for i in range(len(x))})\
+                                       .unstack()\
+                                       .T\
+                                       .to_dict()
+            
+            return building_dict
 
 
         # calculate interarrival times and add as column to the data
@@ -184,6 +210,7 @@ class SimulationEngine():
         # filter out demo incidents, i.e., incidents without deployments
         incidents_before = len(incident_log)
         incident_log = incident_log[np.isin(incident_log["dim_incident_id"], deployment_log["hub_incident_id"])].copy()
+
         if self.verbose:
             print("{} incident(s) removed because there were no corresponding deployments.".format(incidents_before - len(incident_log)))
 
@@ -193,13 +220,20 @@ class SimulationEngine():
         # get the probabilities that an incident occurs in specific demand location
         self.location_probabilities, self.demand_location_ids = \
             get_prob_per_demand_location(incident_log, location=self.demand_location_definition)
+
         # get demand location information
         self.type_probs_per_location, self.type_probs_names = \
             get_type_probs_per_location(incident_log, location=self.demand_location_definition)
+
         # get priority probabilities per incident type
         self.prio_prob_dict = get_prio_probabilities_per_type(incident_log)
+
         # get probabilities of having certain vehicle requirements from an incident
         self.vehicle_prob_dict = get_vehicle_requirements_probabilities(incident_log, deployment_log)
+
+        # get probabilities of an incident occuring in a certain building type/function,
+        # given the location and type of incident
+        self.building_prob_dict = get_building_function_probs(incident_log)
 
         if self.verbose:
             print("Incident parameters are obtained from the data.")
@@ -207,12 +241,14 @@ class SimulationEngine():
 
     def fit_deployment_parameters(self):
         # code of Santiago
+        pass
 
     def initialize_demand_locations(self):
         self.demand_locations = \
             {self.demand_location_ids[i] : DemandLocation(self.demand_location_ids[i],
                                                           self.type_probs_per_location[self.demand_location_ids[i]],
-                                                          self.type_probs_names) \
+                                                          self.type_probs_names,
+                                                          self.building_prob_dict[self.demand_location_ids[i]]) \
                                            for i in range(len(self.demand_location_ids))}
 
     def set_agent(self, agent):
@@ -332,13 +368,21 @@ class Incident():
 class DemandLocation():
     """ An area in which incidents occur. """
 
-    def __init__(self, location_id, incident_type_probs, incident_type_names):
+    def __init__(self, location_id, incident_type_probs, incident_type_names, building_function_dict):
         self.id = location_id
         self.incident_type_probs = incident_type_probs
         self.incident_type_names = incident_type_names
+        self.building_function_dict = building_function_dict
 
     def sample_incident_type(self):
-        return np.random.choice(self.incident_type_names, p=self.incident_type_probs)
+        return np.random.choice(a=self.incident_type_names, p=self.incident_type_probs)
+
+    def sample_building_function(self, incident_type):
+        print("test. keys: {} \nvalues: {}".format(self.building_function_dict[incident_type].keys(),
+                                                   self.building_function_dict[incident_type].values()))
+
+        return np.random.choice(a=list(self.building_function_dict[incident_type].keys()),
+                                p=list(self.building_function_dict[incident_type].values()))
 
 
 class Agent():
