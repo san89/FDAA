@@ -9,6 +9,9 @@ date: June 25, 2018
 """
 import numpy as np
 import pandas as pd
+from pyproj import Proj
+from utils import projections, haversine, pre_process_station_name
+
 
 class SimulationEngine():
     """ Main class to simulate incidents and responses. """
@@ -267,6 +270,130 @@ class SimulationEngine():
             print("Incident parameters are obtained from the data.")
         """ End of fit_incident_parameters """
 
+    def fit_deployment_parameters(self, incident_log, deployment_log, station_locations):
+        """
+        Calculates the parameter values for the deployed resourse required for simulation from the raw data and 
+        stores them in the desired formats.
+        
+        :param incident_log: Pandas DataFrame with incident data.
+        :param deployment_log: Pandas DataFrame with deployment data.
+        :param station_locations: Pandas DAtaFrame with the fire station information.
+        """
+
+        def pre_process_data(incident_log, deployment_log, station_locations):
+            """
+            In this function we do all pre-processing necessary to calculate the different components of the response time.
+            
+            Note: the travel time depends on the speed and the incident location. Because the incident location is a 
+            random variable, we only consider the speed parameters.
+            
+            Params
+            -------------------------------------------
+            df_in: data frame with the incident data
+            df_dep: data frame with the deployment data
+            station_locations: data frame with the fire station data
+
+            
+            Returns:
+            M: dataframe with the merged datasets incident, deplyment and station_location
+            """
+            
+            incindets, deployments = incident_log.copy(), deployment_log.copy()
+
+            inProj  = Proj("+init=EPSG:28992", preserve_units=True)
+            outProj = Proj("+init=EPSG:4326")
+
+            # Some filters to have an somaller merged dataset
+            keep_in_var = ['dim_incident_id','st_x', 'st_y', 'dim_incident_incident_type', 'inc_dim_object_naam', 
+                       'dim_incident_start_datumtijd', 'dim_incident_eind_datumtijd', 'dim_prioriteit_prio', 
+                       'dim_incident_incident_type']
+            
+            
+            keep_dep_var = ['hub_incident_id', 'inzet_uitgerukt_datumtijd', 'inzet_gealarmeerd_datumtijd',
+                        'inzet_terplaatse_datumtijd', 'voertuig_groep', 'kazerne_groep', 'inzet_kazerne_naam', 
+                        'inzet_eind_inzet_datumtijd']
+            
+
+            time_stamps_var = ['dim_incident_start_datumtijd', 'dim_incident_eind_datumtijd', 'inzet_gealarmeerd_datumtijd',
+                          'inzet_uitgerukt_datumtijd', 'inzet_terplaatse_datumtijd', 'inzet_eind_inzet_datumtijd']
+
+            incindets = incindets[keep_in_var]
+            deployments = deployments[keep_dep_var]
+            
+            M = deployments.merge(incindets, left_on='hub_incident_id', right_on='dim_incident_id', how = 'inner')
+            M['inzet_kazerne_naam'] = M['inzet_kazerne_naam'].apply(lambda x: pre_process_station_name(x))
+            
+            
+            # print(set(station_locations['kazerne'].unique()) - (set(station_locations['kazerne'].unique()) & set(M['inzet_kazerne_naam'].unique())))
+            M = station_locations.merge(M, left_on='kazerne', right_on='inzet_kazerne_naam', how = 'inner')
+            M['lon_in'], M['lat_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
+            M['haversine_distance (Km)'] = np.vectorize(haversine)(M['lon'], M['lat'], M['lon_in'], M['lat_in'])
+            
+            for date in time_stamps_var:
+                M[date] = pd.to_datetime(M[date])
+            
+        #     M['dispatch (seconds)'] = (M['inzet_gealarmeerd_datumtijd'] - M['dim_incident_start_datumtijd']).astype('timedelta64[s]')
+            M['dispatch (min)'] = 1.5
+            M['turn out time (min)'] = (M['inzet_uitgerukt_datumtijd'] - M['inzet_gealarmeerd_datumtijd']).astype('timedelta64[m]')
+            M['travel time (min)'] = (M['inzet_terplaatse_datumtijd'] - M['inzet_uitgerukt_datumtijd']).astype('timedelta64[m]')
+            M['response time (min)'] = M['turn out time (min)'] + M['travel time (min)'] + M['dispatch (min)'] 
+            M['Average Speed (Km/h)'] = M['haversine_distance (Km)']/(M['travel time (min)']/(60))
+            total_incident_duration = (M['inzet_eind_inzet_datumtijd'] - M['dim_incident_start_datumtijd']).astype('timedelta64[m]')
+            #We assume an average speed of 40 Kn/h in the way back to the station
+            M['on scene duration (min)'] = total_incident_duration - M['response time (min)'] - (M['haversine_distance (Km)'] * (1/40))
+
+            #Some filters to remove outliers
+            M = M[(M['Average Speed (Km/h)']>0) & (M['Average Speed (Km/h)']<150) & (M['on scene duration (min)']>0) & 
+                  (M['turn out time (min)']>0) & (M['dispatch (min)']>0)]
+            
+            return M.replace([np.inf, -np.inf], np.nan).dropna()
+
+        def create_time_parameters(merged_log):
+            """
+            Calculate different aggregate levels of the time dependent parameters
+
+            Params:
+            ------------------------------------------
+            merged_log: see funtion pre_process_data
+
+            Return
+            -----------------------------------------
+            Global dictionary response_time_parameters that have three levels of aggregation. Level one is the less aggregated level  
+
+            """
+
+            M = merged_log.copy() 
+
+            # We only include priority one and two incidents
+            M = M[M['dim_prioriteit_prio'] <3]
+            response_time_parameters = {}
+            response_time_parameters['level_1'] = M.groupby(['kazerne', 'dim_prioriteit_prio', 'voertuig_groep'], as_index=False).agg({
+                                                                          'dispatch (min)':['mean','std', 'count'],
+                                                                          'turn out time (min)':['mean','std'],
+                                                                          'response time (min)':['mean','std'],
+                                                                          'Average Speed (Km/h)':['mean','std']}).dropna()
+
+
+            response_time_parameters['level_2'] = M.groupby([ 'dim_prioriteit_prio', 'voertuig_groep'], as_index=False).agg({
+                                                                          'dispatch (min)':['mean','std', 'count'],
+                                                                          'turn out time (min)':['mean','std'],
+                                                                          'response time (min)':['mean','std'],
+                                                                          'Average Speed (Km/h)':['mean','std']}).dropna()
+
+            response_time_parameters['level_3'] = M.groupby(['voertuig_groep'], as_index=False).agg({
+                                                                          'dispatch (min)':['mean','std', 'count'],
+                                                                          'turn out time (min)':['mean','std'],
+                                                                          'response time (min)':['mean','std'],
+                                                                          'Average Speed (Km/h)':['mean','std']}).dropna()
+
+            return response_time_parameters
+
+
+    
+        self.merged_log = pre_process_data(incident_log, deployment_log, station_locations)
+        self.response_time_parameters = create_time_parameters(self.merged_log)
+        self.station_locations = station_locations
+
     def initialize_demand_locations(self):
         self.demand_locations = \
             {self.demand_location_ids[i] : DemandLocation(self.demand_location_ids[i],
@@ -347,6 +474,173 @@ class SimulationEngine():
         return Incident(self.time, incident_type, priority, vehicles, incident_location_id, building_function, response_time_target)
 
 
+    def get_vehicle_simulated_values(self, station, incident_priority, incident_location, vehicle_type, on_scene_time):
+
+
+        def check_statistical_significance(df, n=20):
+            """
+            check if the filtered subset is statistical significant
+            
+            Parameters
+            ----------------------------------------
+            df: dataFrame with the parameter of the filter made at the funtion get_parameters
+            n: minimun number of observations to consider the parameters as significant
+            
+            Return
+            -----------------------------------------
+            True if the parameters are statistically significant, False otherwise
+            """
+            
+            names = df.columns.get_level_values(level=0).unique()[0:3]
+            try:
+                statistical_significance = df['dispatch (min)']['count'].values < n
+                statistical_significance = statistical_significance[0]
+
+                
+            except IndexError:
+                print('Empty dataFrame')
+                statistical_significance = True
+            
+            if statistical_significance:
+                    print('No enougth observations, the minumin is n={}'.format(n))
+                    return False
+                
+            return True
+                    
+        def get_parameters(station, vehicle, incident_priority, ):
+            """
+            get the mean and standar deviation of the time distribution of the required sources
+            
+            Parameters
+            ----------------------------------------------
+            See the response_time_simulation parameters
+            
+            Return
+            --------------------------------------------
+            lower aggregated parameters
+            """
+            
+            # Level one of aggregation
+            parameters = self.response_time_parameters['level_1'][ 
+                                                 (self.response_time_parameters['level_1']['kazerne'] == station) & 
+                                                 (self.response_time_parameters['level_1']['dim_prioriteit_prio'] == incident_priority) &
+                                                 (self.response_time_parameters['level_1']['voertuig_groep'] == vehicle)
+                                                 ]
+
+            if check_statistical_significance(parameters):
+                print('getting the parameters from level_1 of the vehicle {}'.format(vehicle))
+                return parameters
+            
+            # Level two of aggregation
+            parameters = self.response_time_parameters['level_2'][  
+                                                 (self.response_time_parameters['level_2']['dim_prioriteit_prio'] == incident_priority) &
+                                                 (self.response_time_parameters['level_2']['voertuig_groep'] == vehicle)
+                                                 ]
+                
+            if check_statistical_significance(parameters):
+                print('getting the parameters from level_2 of the vehicle {}'.format(vehicle))
+                return parameters
+            
+            # Level one of aggregation
+            parameters = self.response_time_parameters['level_3'][  
+                                                 (self.response_time_parameters['level_3']['voertuig_groep'] == vehicle)
+                                                 ]
+            print('getting the parameters from level_3 of the vehicle {}'.format(vehicle))
+            
+            return parameters
+            
+
+        def return_trip_duration(distance_km, station, vehicle):
+            """
+            Calculate the expected trip back duration in seconds. We assume priority two distribution per vehicle,
+            We get higher distribution otherwise.
+            
+            Parameters
+            ----------------------------------------
+            See response_time_simulation funtion
+            
+            Return
+            ---------------------------------------
+            travel time back to the fire station in minutes
+            """
+            parameters = get_parameters(station, vehicle, 2)
+            
+            while True:
+                speed_km = np.random.normal(parameters['Average Speed (Km/h)']['mean'], 
+                                            parameters['Average Speed (Km/h)']['std'], 1)[0]    
+                if speed_km > 0:
+                    break
+            
+            return 1/(speed_km / distance_km / 60)
+
+        def get_simulated_values(station, vehicle, incident_priority, incident_location, on_scene_time):
+            """
+            Function to calculate the simulated value
+            
+            Paramters:
+            ------------------------------------------
+            see response_time_simulation
+            
+            Return
+            ----------------------------------------
+            x: random value x that assumes normal ditsribution
+            """
+            x = {}
+            parameters = get_parameters(station, vehicle, incident_priority)
+            if parameters is None:
+                return parameters
+            
+            reponse_time = 0.
+            for var in list(self.response_time_parameters['level_1'].columns.get_level_values(level=0).unique()[3::]):
+                temp_par = parameters[var]
+                
+                # Safe card
+                while True:
+                    random_var = np.random.normal(temp_par['mean'], temp_par['std'], 1)[0]
+                    if random_var > 0:
+                        break
+                    
+                x[var] = random_var
+
+                
+            self.station_locations[self.station_locations['kazerne'] == station][['lon', 'lat']]
+            distance_km = haversine(incident_location[1], incident_location[0], 
+                                    self.station_locations[self.station_locations['kazerne'] == station]['lon'], 
+                                    self.station_locations[self.station_locations['kazerne'] == station]['lat'])
+            
+            
+            x['travel time (min)'] = 1/(x['Average Speed (Km/h)'] / distance_km / 60)
+            x['response time (min)'] = x['dispatch (min)'] + x['turn out time (min)'] + x['travel time (min)']
+            x['on secene and trip back (min)'] = on_scene_time + return_trip_duration(distance_km, station, vehicle)
+            x['total incident duration (min)'] = x['response time (min)'] + x['on secene and trip back (min)']
+            return x
+            
+            
+        def response_time_simulation(station, incident_priority, incident_location, vehicle_type, on_scene_time):
+            """
+            Calculate the simulated response time per vehicle. We assume normality on the time distributions
+            
+            Parameters
+            --------------------------------------------
+            station: The station that is going to be used to deploy the vehicles
+            incident_priority: (str) is the priority of the incident (dim_prioriteit_prio)
+            incident_location: [latitud, longitud] latitud and longitud of the incident
+            vehicle_type: [] list with the vehicles that will to be deployed 
+            on_scene_time: (float) expected incident duration time in minutes
+            
+            Return
+            --------------------------------------------
+            response_time = (dict) every time component per vehicle type
+            """
+            response_time = {}
+            vehicle, freq = np.unique(vehicle_type, return_counts=True)
+            for v, iter_ in zip(vehicle, freq):
+                for i in range(iter_):
+                    response_time[v + '_' + str(i)] = get_simulated_values(station, v, incident_priority,
+                                                                           incident_location, on_scene_time)
+            return response_time
+
+        return response_time_simulation(station, incident_priority, incident_location, vehicle_type, on_scene_time)
     def step(self):
         """ Take one simulation step (one incident). """
         self.time = float(self.time + np.random.exponential(self.mean_interarrival_time, 1))
