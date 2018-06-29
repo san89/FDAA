@@ -19,6 +19,34 @@ class SimulationEngine():
         self.demand_location_definition = demand_location_definition
         self.verbose = verbose
 
+        self.building_to_target_dict = {'Bijeenkomstfunctie' : 10,
+                                        'Industriefunctie' : 8,
+                                        'Woonfunctie' : 8,
+                                        'Straat' : 10,
+                                        'Overige gebruiksfunctie' : 10,
+                                        'Kantoorfunctie' : 10,
+                                        'Logiesfunctie' : 8,
+                                        'Onderwijsfunctie' : 8,
+                                        'Grachtengordel' : 10,
+                                        'Overig' : 10,
+                                        'Winkelfunctie' : 5,
+                                        'Kanalen en rivieren' : 10,
+                                        'nan' : 10,
+                                        'Trein' : 5,
+                                        'Sportfunctie' : 10,
+                                        'Regionale weg' : 10,
+                                        'Celfunctie' : 5,
+                                        'Tram' : 5,
+                                        'Sloten en Vaarten' : 10,
+                                        'Gezondheidszorgfunctie' : 8,
+                                        'Lokale weg' : 5,
+                                        'Polders' : 10,
+                                        'Haven' : 10,
+                                        'Autosnelweg' : 10,
+                                        'Meren en plassen' : 10,
+                                        'Hoofdweg' : 10,
+                                        'unknown': 10}
+
 
     def fit_incident_parameters(self, incident_log, deployment_log, time_of_day_filter=None, filter_demo_incidents=True):
         """ Calculates the parameter values required for simulation from the raw data
@@ -239,10 +267,6 @@ class SimulationEngine():
             print("Incident parameters are obtained from the data.")
         """ End of fit_incident_parameters """
 
-    def fit_deployment_parameters(self):
-        # code of Santiago
-        pass
-
     def initialize_demand_locations(self):
         self.demand_locations = \
             {self.demand_location_ids[i] : DemandLocation(self.demand_location_ids[i],
@@ -295,16 +319,8 @@ class SimulationEngine():
             vehicle_requirements =  {key : sample(v[key]) for key in v.keys()} # finish this line
             vehicle_requirements = {k : v for k, v in vehicle_requirements.items() if v > 0}
             
-            # sample response time target (deterministic for now)
-            if prio == 1:
-                response_time_target = 10 # TODO: implement response time targets
-            elif prio == 2:
-                response_time_target = 30
-            else: 
-                response_time_target = 60
-            
             # TODO: add incident duration
-            return prio, vehicle_requirements, response_time_target
+            return prio, vehicle_requirements
 
 
         def sample_incident_duration(type_of_incident):
@@ -316,11 +332,19 @@ class SimulationEngine():
             # TODO
             return 20
 
+        def get_response_time_target(priority, building_function):
+            if priority == 1:
+                return self.building_to_target_dict[building_function]
+            else:
+                return 30
+
         incident_location_id = sample_location(self.demand_location_ids, self.location_probabilities)
         incident_type = self.demand_locations[incident_location_id].sample_incident_type()
-        priority, vehicles, response_time_target = sample_deployment_requirements(incident_type)
+        building_function = self.demand_locations[incident_location_id].sample_building_function(incident_type)
+        priority, vehicles = sample_deployment_requirements(incident_type)
+        response_time_target = get_response_time_target(priority, building_function)
 
-        return Incident(self.time, incident_type, priority, vehicles, incident_location_id)
+        return Incident(self.time, incident_type, priority, vehicles, incident_location_id, building_function, response_time_target)
 
 
     def step(self):
@@ -357,7 +381,7 @@ class Incident():
         can be a fire or something else.
     """
     
-    def __init__(self, start_time, incident_type, priority, required_vehicles, location):
+    def __init__(self, start_time, incident_type, priority, required_vehicles, location, building_function, response_time_target):
         self.start_time = start_time
         self.type = incident_type
         self.priority = priority
@@ -378,9 +402,6 @@ class DemandLocation():
         return np.random.choice(a=self.incident_type_names, p=self.incident_type_probs)
 
     def sample_building_function(self, incident_type):
-        print("test. keys: {} \nvalues: {}".format(self.building_function_dict[incident_type].keys(),
-                                                   self.building_function_dict[incident_type].values()))
-
         return np.random.choice(a=list(self.building_function_dict[incident_type].keys()),
                                 p=list(self.building_function_dict[incident_type].values()))
 
