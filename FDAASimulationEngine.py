@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from pyproj import Proj
 from utils import projections, haversine, pre_process_station_name, get_safe_random_value_normal
-
+import time
 
 class SimulationEngine():
     """ Main class to simulate incidents and responses. """
@@ -418,7 +418,7 @@ class SimulationEngine():
                   (M['turn out time (min)']>0) & (M['dispatch (min)']>0) & (M['on scene duration (min)'] < 250) & (M['dim_prioriteit_prio']<3)].replace([np.inf, -np.inf], np.nan).dropna()
 
             if self.verbose:
-                print("{} deployments out of {} has been deleting because they are labeled as 'outliers'".format(M_before - len(M), M_before))
+                print("{} deployments out of {} has been deleted because they are labeled as 'outliers'".format(M_before - len(M), M_before))
             
             return M
 
@@ -727,12 +727,13 @@ class SimulationEngine():
             # we assume a constant speed of 40 Km/h
             station_locations['Expected arrival time (min)'] = np.vectorize(haversine)(station_locations['lon'], station_locations['lat'], incident.location_coord[1], incident.location_coord[0]) * (1/40) * (60)
             vehicles_status = vehicles_status[vehicles_status['vehicle_type'].isin(list(incident.required_vehicles.keys()))]
-            vehicles_status['Expected arrival time (min)'] = np.inf
+            # vehicles_status['Expected arrival time (min)'] = np.inf
+            # This operation must be optimiced!
 
-            for index, row in station_locations.iterrows():
-                vehicles_status.loc[vehicles_status['fire_station_assigned'] == row['kazerne'], 'Expected arrival time (min)'] = row['Expected arrival time (min)'] 
+            vehicles_status = vehicles_status.merge(station_locations, left_on='fire_station_assigned', right_on='kazerne', how = 'inner')
 
-
+            # for index, row in station_locations.iterrows():
+            #     vehicles_status.loc[vehicles_status['fire_station_assigned'] == row['kazerne'], 'Expected arrival time (min)'] = row['Expected arrival time (min)'] 
             vehicles_status['Expected arrival time (min)']  += vehicles_status['available_from_time']
             # Find the fastest cars
             vehicles_status = vehicles_status.sort_values(by=['Expected arrival time (min)']).dropna()
@@ -740,12 +741,12 @@ class SimulationEngine():
             vehicles_ids = []
             for key, value in incident.required_vehicles.items():
                 temp_v = vehicles_status[vehicles_status['vehicle_type'] == key]
-
-                if value>len(temp_v) & self.verbose:
+                if (value > len(temp_v)) & self.verbose:
                     print('Warning!! more vehicles type {} are required than avaibale'.format(key))
 
                 n = min(value, len(temp_v))
                 vehicles_ids.extend(list(temp_v['ID'][0:n]))
+
             return vehicles_ids
                     
 
@@ -757,7 +758,7 @@ class SimulationEngine():
         """
 
         for key, value in deploymet_time.items():
-            self.vehicles_status.loc[self.vehicles_status['ID'] == key, 'available_from_time'] = value['total incident duration (min)'] + np.max(self.time, float(self.vehicles_status[self.vehicles_status['ID'] == 0]['available_from_time']))
+            self.vehicles_status.loc[self.vehicles_status['ID'] == key, 'available_from_time'] = value['total incident duration (min)'] + max(self.time, float(self.vehicles_status[self.vehicles_status['ID'] == 0]['available_from_time']))
 
 
     def step(self):
@@ -777,9 +778,7 @@ class SimulationEngine():
         
         # TODO: evaluate if the vehicles (probably only TS) reach the incident on time
         self.update_vehicle_status(deploymet_time)
-        print(incident.required_vehicles)
-        print(deployment)
-        print(self.vehicles_status)
+
 
     def simulate(self, simulation_time, nr_incidents=None, by_incidents=False):
         """ Run the simulation. """ 
