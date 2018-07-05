@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 from pyproj import Proj
 from utils import projections, haversine, pre_process_station_name, get_safe_random_value_normal
-
+import time
 
 class SimulationEngine():
     """ Main class to simulate incidents and responses. """
@@ -718,6 +718,40 @@ class SimulationEngine():
         return response_time_simulation(incident_priority, incident_location, vehicle_type, on_scene_time)
 
 
+    def agent(self, incident, station_locations, vehicles_status):
+        def shortest_trip_rule(incident, station_locations, vehicles_status):
+            """
+                This heuristic takes the vehicles that are expected to arrive first based on their current status and 
+            """
+            # we assume a constant speed of 40 Km/h
+            station_locations['Expected arrival time (min)'] = np.vectorize(haversine)(station_locations['lon'], station_locations['lat'], incident.location_coord[1], incident.location_coord[0]) * (1/40) * (60)
+            vehicles_status = vehicles_status[vehicles_status['vehicle_type'].isin(list(incident.required_vehicles.keys()))]
+            # vehicles_status['Expected arrival time (min)'] = np.inf
+            # This operation must be optimiced!
+
+            vehicles_status = vehicles_status.merge(station_locations, left_on='fire_station_assigned', right_on='kazerne', how = 'inner')
+
+            # for index, row in station_locations.iterrows():
+            #     vehicles_status.loc[vehicles_status['fire_station_assigned'] == row['kazerne'], 'Expected arrival time (min)'] = row['Expected arrival time (min)'] 
+            vehicles_status['Expected arrival time (min)']  += vehicles_status['available_from_time']
+            # Find the fastest cars
+            vehicles_status = vehicles_status.sort_values(by=['Expected arrival time (min)']).dropna()
+            # Assign resourses
+            vehicles_ids = []
+            for key, value in incident.required_vehicles.items():
+                temp_v = vehicles_status[vehicles_status['vehicle_type'] == key]
+                if (value > len(temp_v)) & self.verbose:
+                    print('Warning!! more vehicles type {} are required than avaibale'.format(key))
+
+                n = min(value, len(temp_v))
+                vehicles_ids.extend(list(temp_v['ID'][0:n]))
+
+            return vehicles_ids
+                    
+
+        return shortest_trip_rule(incident, station_locations.copy(), vehicles_status.copy())
+
+
     def update_vehicle_status(self, deploymet_time):
         """
            Update the vehicles_status DataFrame
@@ -725,7 +759,6 @@ class SimulationEngine():
 
         for key, value in deploymet_time.items():
             self.vehicles_status.loc[self.vehicles_status['ID'] == key, 'available_from_time'] = value['total incident duration (min)'] + max(self.time, float(self.vehicles_status[self.vehicles_status['ID'] == 0]['available_from_time']))
-
 
     def reset_results(self):
 
@@ -765,8 +798,10 @@ class SimulationEngine():
                                                               columns=self.deployment_results.columns),
                                                 ignore_index=True)
 
+
     def print_deployment_results(self):
         print(self.deployment_results)
+
 
     def get_on_time_rate(self, ts_only=True):
         if not ts_only:
@@ -788,7 +823,7 @@ class SimulationEngine():
             print("Time: {}. Incident: {} with priority {} at postcode {}.".format(
                   self.time, incident.type, incident.priority, incident.location))
 
-        # We defice what vehicles to use
+        # define what vehicles to use
         vehicles_to_deploy = self.agent(incident, self.station_locations, self.vehicles_status)
 
         # calculate the time required based on the vehicles selected
@@ -796,9 +831,8 @@ class SimulationEngine():
                                                              vehicles_to_deploy, incident.on_scene_duration)
         self.update_vehicle_status(deployment_times)
 
-        # TODO: evaluate if the vehicles (probably only TS) reach the incident on time
+        # evaluate if the vehicles (probably only TS) reach the incident on time
         self.evaluate_deployments(incident, deployment_times)
-        
 
     def simulate(self, simulation_time, nr_incidents=None, by_incidents=False):
         """ Run the simulation. """ 
@@ -812,38 +846,6 @@ class SimulationEngine():
 
     def reset_time(self):
         self.time = 0
-
-
-
-    def agent(self, incident, station_locations, vehicles_status):
-
-        def shortest_trip_rule(incident, station_locations, vehicles_status):
-            """
-                This heuristic takes the vehicles that are expected to arrive first based on their current status and 
-            """
-            # we assume a constant speed of 40 Km/h
-            station_locations['Expected arrival time (min)'] = np.vectorize(haversine)(station_locations['lon'], station_locations['lat'], incident.location_coord[1], incident.location_coord[0]) * (1/40) * (60)
-            vehicles_status = vehicles_status[vehicles_status['vehicle_type'].isin(list(incident.required_vehicles.keys()))]
-
-            vehicles_status = vehicles_status.merge(station_locations, left_on='fire_station_assigned', right_on='kazerne', how = 'inner')
-
-            vehicles_status['Expected arrival time (min)']  += vehicles_status['available_from_time']
-            # Find the fastest cars
-            vehicles_status = vehicles_status.sort_values(by=['Expected arrival time (min)']).dropna()
-            # Assign resourses
-            vehicles_ids = []
-            for key, value in incident.required_vehicles.items():
-                temp_v = vehicles_status[vehicles_status['vehicle_type'] == key]
-
-                if (value>len(temp_v)) & (self.verbose):
-                    print('Warning!! {} vehicles of type {} required, but only {} available in the region.'.format(value, key, len(temp_v)))
-
-                n = min(value, len(temp_v))
-                vehicles_ids.extend(list(temp_v['ID'][0:n]))
-            return vehicles_ids
-                    
-
-        return shortest_trip_rule(incident, station_locations.copy(), vehicles_status.copy())
 
 
 class Deployments():
