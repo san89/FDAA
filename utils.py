@@ -10,7 +10,10 @@ def projections(x,y, inProj, outProj):
     in this funtion we transform the data from the coordinate system to gps
     """
     longitd, latitud = transform(inProj,outProj,x,y)
-    return longitd, latitud
+    return latitud, longitd
+
+def pythagoras(x, y):
+    return np.sqrt(x**2 + y**2)
 
 def haversine(lon1, lat1, lon2, lat2):
     """

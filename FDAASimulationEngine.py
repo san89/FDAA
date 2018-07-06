@@ -60,7 +60,6 @@ class SimulationEngine():
         self.fit_deployment_parameters(incident_log, deployment_log, station_locations)
         self.fit_incident_parameters(incident_log, deployment_log, from_post_to_coor,time_of_day_filter, filter_demo_incidents)
         self.fit_vehicle_parameters(initial_allocation)
-        
 
     
     def fit_vehicle_parameters(self, initial_allocation):
@@ -273,6 +272,15 @@ class SimulationEngine():
             
             return building_dict
 
+        def map_postcode_to_latlong(incident_data):
+
+            inProj  = Proj("+init=EPSG:28992", preserve_units=True)
+            outProj = Proj("+init=EPSG:4326")
+            incident_data["dim_incident_postcode_digits"] = incident_data["dim_incident_postcode"].str[0:4]
+            incident_data = incident_data.groupby("dim_incident_postcode_digits")[["st_x", "st_y"]].agg("mean").reset_index()
+            incident_data["latlong"] = incident_data.apply(lambda x: projections(int(x["st_x"]), int(x["st_y"]), inProj, outProj), axis=1)
+            return incident_data[["dim_incident_postcode_digits", "latlong"]].set_index("dim_incident_postcode_digits").to_dict()["latlong"]
+
         ################################# PARAMETERS ##############################################
         # calculate interarrival times and add as column to the data
         incident_log["interarrival_time"] = calculate_interarrival_times(incident_log, time_in="minutes")
@@ -319,7 +327,7 @@ class SimulationEngine():
             get_prob_per_demand_location(incident_log, location=self.demand_location_definition)
 
         # set dictionary to translate postal code to latitud and longitud
-        self.location_dict = dict(zip(from_post_to_coor['Postal Code'], zip(from_post_to_coor['Latitude'], from_post_to_coor['Longitude'])))
+        self.location_dict = map_postcode_to_latlong(incident_log)
 
         # get demand location information
         self.type_probs_per_location, self.type_probs_names = \
@@ -394,7 +402,7 @@ class SimulationEngine():
             
             # print(set(station_locations['kazerne'].unique()) - (set(station_locations['kazerne'].unique()) & set(M['inzet_kazerne_naam'].unique())))
             M = station_locations.merge(M, left_on='kazerne', right_on='inzet_kazerne_naam', how = 'inner')
-            M['lon_in'], M['lat_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
+            M['lat_in'], M['lon_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
             M['haversine_distance (Km)'] = np.vectorize(haversine)(M['lon'], M['lat'], M['lon_in'], M['lat_in'])
             
             for date in time_stamps_var:
@@ -588,7 +596,7 @@ class SimulationEngine():
 
             return True
 
-        def get_parameters(station, vehicle, incident_priority, ):
+        def get_parameters(station, vehicle, incident_priority):
             """
             get the mean and standar deviation of the time distribution of the required sources
             
@@ -631,9 +639,9 @@ class SimulationEngine():
 
             if self.verbose:
                 print('getting the parameters from level_3 of the vehicle {}'.format(vehicle))
-            
+
             return parameters
-            
+
 
         def return_trip_duration(distance_km, station, vehicle):
             """
@@ -652,6 +660,7 @@ class SimulationEngine():
             speed_km = get_safe_random_value_normal(parameters['Average Speed (Km/h)']['mean'], parameters['Average Speed (Km/h)']['std'])
             
             return  (distance_km / speed_km) * 60 
+
 
         def get_simulated_values(station, vehicle, incident_priority, incident_location, on_scene_time):
             """
@@ -674,9 +683,7 @@ class SimulationEngine():
             for var in list(self.response_time_parameters['level_1'].columns.get_level_values(level=0).unique()[4::]):
                 temp_par = parameters[var]
                 x[var] = get_safe_random_value_normal(temp_par['mean'], temp_par['std'])
-                    
 
-                
             self.station_locations[self.station_locations['kazerne'] == station][['lon', 'lat']]
             x["distance_km"] = haversine(incident_location[1], incident_location[0], 
                                         self.station_locations[self.station_locations['kazerne'] == station]['lon'], 
@@ -807,11 +814,7 @@ class SimulationEngine():
         if not ts_only:
             return self.deployment_results["on_time"].mean()
         else:
-            type_added = pd.merge(self.deployment_results, self.vehicles_status[["ID", "vehicle_type"]],
-                                  left_on="vehicle_id", right_on="ID", how="left")
-            ts_data = type_added["on_time"][type_added["vehicle_type"]=="TS"]
-            return ts_data.mean()
-
+            return self.deployment_results[self.deployment_results["vehicle_type"]=="TS"]["on_time"].mean()
 
     def step(self):
         """ Take one simulation step (one incident). """
