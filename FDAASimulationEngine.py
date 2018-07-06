@@ -10,7 +10,7 @@ date: June 25, 2018
 import numpy as np
 import pandas as pd
 from pyproj import Proj
-from utils import projections, haversine, pre_process_station_name, get_safe_random_value_normal
+from utils import projections, haversine, pre_process_station_name, get_safe_random_value_normal, lonlat_to_xy, pythagoras
 import time
 
 class SimulationEngine():
@@ -281,6 +281,13 @@ class SimulationEngine():
             incident_data["latlong"] = incident_data.apply(lambda x: projections(int(x["st_x"]), int(x["st_y"]), inProj, outProj), axis=1)
             return incident_data[["dim_incident_postcode_digits", "latlong"]].set_index("dim_incident_postcode_digits").to_dict()["latlong"]
 
+        def map_postcode_to_xy(incident_data):
+            incident_data = incident_data.groupby("dim_incident_postcode_digits")[["st_x", "st_y"]].agg("mean")
+            incident_data["xy_coords"] = list(zip(incident_data["st_x"], incident_data["st_y"]))
+            incident_data.to_dict()["xy_coords"]
+            return incident_data.to_dict()["xy_coords"]
+
+
         ################################# PARAMETERS ##############################################
         # calculate interarrival times and add as column to the data
         incident_log["interarrival_time"] = calculate_interarrival_times(incident_log, time_in="minutes")
@@ -327,7 +334,8 @@ class SimulationEngine():
             get_prob_per_demand_location(incident_log, location=self.demand_location_definition)
 
         # set dictionary to translate postal code to latitud and longitud
-        self.location_dict = map_postcode_to_latlong(incident_log)
+        #self.location_dict = map_postcode_to_latlong(incident_log)
+        self.location_dict = map_postcode_to_xy(incident_log)
 
         # get demand location information
         self.type_probs_per_location, self.type_probs_names = \
@@ -398,27 +406,35 @@ class SimulationEngine():
             
             M = deployments.merge(incindets, left_on='hub_incident_id', right_on='dim_incident_id', how = 'inner')
             M['inzet_kazerne_naam'] = M['inzet_kazerne_naam'].apply(lambda x: pre_process_station_name(x))
-            
-            
+
+            # add x, y coordinates to station location data
+            station_locations["x"], station_locations["y"] = \
+                [list(l) for l in zip(*list(station_locations.apply(lambda x: lonlat_to_xy(x["lon"], x["lat"]), axis=1)))]
+
             # print(set(station_locations['kazerne'].unique()) - (set(station_locations['kazerne'].unique()) & set(M['inzet_kazerne_naam'].unique())))
             M = station_locations.merge(M, left_on='kazerne', right_on='inzet_kazerne_naam', how = 'inner')
-            M['lat_in'], M['lon_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
-            M['haversine_distance (Km)'] = np.vectorize(haversine)(M['lon'], M['lat'], M['lon_in'], M['lat_in'])
+            #M['lat_in'], M['lon_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
+            #M['haversine_distance (Km)'] = np.vectorize(haversine)(M['lon'], M['lat'], M['lon_in'], M['lat_in'])
+
+            # calculate pythagoras distance
+            M['pythagoras_distance'] = M.apply(lambda x: pythagoras(x["x"], x["y"], x["st_x"], x["st_y"]), axis=1) / 1000 # km
             
             for date in time_stamps_var:
                 M[date] = pd.to_datetime(M[date])
-            
+
             # M['dispatch (seconds)'] = (M['inzet_gealarmeerd_datumtijd'] - M['dim_incident_start_datumtijd']).astype('timedelta64[s]')
             M['dispatch (min)'] = 1.5
             M['turn out time (min)'] = (M['inzet_uitgerukt_datumtijd'] - M['inzet_gealarmeerd_datumtijd']).astype('timedelta64[m]')
             M['travel time (min)'] = (M['inzet_terplaatse_datumtijd'] - M['inzet_uitgerukt_datumtijd']).astype('timedelta64[m]')
             M['response time (min)'] = M['turn out time (min)'] + M['travel time (min)'] + M['dispatch (min)'] 
-            M['Average Speed (Km/h)'] = M['haversine_distance (Km)']/(M['travel time (min)']/(60))
+            #M['Average Speed (Km/h)'] = M['haversine_distance (Km)']/(M['travel time (min)']/(60))
+            M['Average Speed (Km/h)'] = M['pythagoras_distance']/(M['travel time (min)']/(60))
             total_incident_duration = (M['inzet_eind_inzet_datumtijd'] - M['dim_incident_start_datumtijd']).astype('timedelta64[m]')
 
             M_before = len(M)
             #We assume an average speed of 40 Kn/h in the way back to the station
-            M['on scene duration (min)'] = total_incident_duration - M['response time (min)'] - (M['haversine_distance (Km)'] * (1/30))
+            #M['on scene duration (min)'] = total_incident_duration - M['response time (min)'] - (M['haversine_distance (Km)'] * (1/30))
+            M['on scene duration (min)'] = total_incident_duration - M['response time (min)'] - (M['pythagoras_distance'] * (1/30))
 
             #Some filters to remove outliers. This process can be done in a best way for sure
             M = M[(M['Average Speed (Km/h)']>0) & (M['Average Speed (Km/h)']<150) & (M['on scene duration (min)']>0) & 
@@ -469,19 +485,17 @@ class SimulationEngine():
             return response_time_parameters
 
         def get_parameters_on_scene_time(merged_log):
-            """
-                This function calculated the mean 
-
-            """
+            """ This function calculated the mean. """
             parameters_on_scene_time = self.merged_log.groupby(['dim_incident_incident_type'], as_index=False).agg({
                 'on scene duration (min)':['mean', 'std']}).dropna()
-
 
             return dict(zip(parameters_on_scene_time['dim_incident_incident_type'], zip(parameters_on_scene_time['on scene duration (min)']['mean'], parameters_on_scene_time['on scene duration (min)']['std'])))
 
         ################################## PARAMETERS ###########################################################
         self.merged_log = pre_process_data(incident_log, deployment_log, station_locations)
         self.response_time_parameters = create_time_parameters(self.merged_log.copy())
+        station_locations["x"], station_locations["y"] = \
+                [list(l) for l in zip(*list(station_locations.apply(lambda x: lonlat_to_xy(x["lon"], x["lat"]), axis=1)))]
         self.station_locations = station_locations
         self.parameters_on_scene_time = get_parameters_on_scene_time(self.merged_log.copy())
 
@@ -688,16 +702,19 @@ class SimulationEngine():
                 temp_par = parameters[var]
                 x[var] = get_safe_random_value_normal(temp_par['mean'], temp_par['std'])
 
+            #self.station_locations[self.station_locations['kazerne'] == station][['lon', 'lat']]
+            #x["distance_km"] = haversine(incident_location[1], incident_location[0], 
+            #                            self.station_locations[self.station_locations['kazerne'] == station]['lon'], 
+            #                            self.station_locations[self.station_locations['kazerne'] == station]['lat'])
             self.station_locations[self.station_locations['kazerne'] == station][['lon', 'lat']]
-            x["distance_km"] = haversine(incident_location[1], incident_location[0], 
-                                        self.station_locations[self.station_locations['kazerne'] == station]['lon'], 
-                                        self.station_locations[self.station_locations['kazerne'] == station]['lat'])
-                
+            station_info = self.station_locations[self.station_locations['kazerne'] == station]
+            x["pythagoras_distance"] = float(pythagoras(station_info["x"], station_info["y"], incident_location[0], incident_location[1]) / 1000)
 
             x['dispatch (min)'] = 1.5
-            x['travel time (min)'] = (x["distance_km"] / x['Average Speed (Km/h)']) * 60
+            #x['travel time (min)'] = (x["distance_km"] / x['Average Speed (Km/h)']) * 60
+            x['travel time (min)'] = (x["pythagoras_distance"] / x['Average Speed (Km/h)']) * 60
             x['response time (min)'] = x['dispatch (min)'] + x['turn out time (min)'] + x['travel time (min)'] 
-            x['on scene and trip back (min)'] = on_scene_time + return_trip_duration(x["distance_km"], station, vehicle)
+            x['on scene and trip back (min)'] = on_scene_time + return_trip_duration(x["pythagoras_distance"], station, vehicle)
             x['total incident duration (min)'] = x['response time (min)'] + x['on scene and trip back (min)']
             return x
             
@@ -735,7 +752,13 @@ class SimulationEngine():
                 This heuristic takes the vehicles that are expected to arrive first based on their current status and 
             """
             # we assume a constant speed of 40 Km/h
-            station_locations['Expected arrival time (min)'] = np.vectorize(haversine)(station_locations['lon'], station_locations['lat'], incident.location_coord[1], incident.location_coord[0]) * (1/40) * (60)
+            #station_locations['Expected arrival time (min)'] = np.vectorize(haversine)(station_locations['lon'], station_locations['lat'], incident.location_coord[1], incident.location_coord[0]) * (1/40) * (60)
+            station_locations['Expected arrival time (min)'] = station_locations.apply(lambda x: pythagoras(x["x"],
+                                                                                                            x["y"],
+                                                                                                            incident.location_coord[0],
+                                                                                                            incident.location_coord[1]) / 1000 / 40 * 60,
+                                                                                       axis=1)
+
             vehicles_status = vehicles_status[vehicles_status['vehicle_type'].isin(list(incident.required_vehicles.keys()))]
             # vehicles_status['Expected arrival time (min)'] = np.inf
             # This operation must be optimiced!
@@ -804,14 +827,14 @@ class SimulationEngine():
                                                               d["response time (min)"],
                                                               d["response time (min)"] < incident.response_time_target,
                                                               d["on scene and trip back (min)"],
-                                                              d["distance_km"],
+                                                              d["pythagoras_distance"],
                                                               d["Average Speed (Km/h)"]]],
                                                               columns=self.deployment_results.columns),
                                                 ignore_index=True)
 
 
-    def print_deployment_results(self):
-        print(self.deployment_results)
+    def get_deployment_results(self):
+        return self.deployment_results
 
 
     def get_on_time_rate(self, ts_only=True):

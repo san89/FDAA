@@ -5,15 +5,24 @@ from math import radians, cos, sin, asin, sqrt,atan2
 from pyproj import Proj, transform
 
 
-def projections(x,y, inProj, outProj):
+def projections(x, y, inProj, outProj):
     """
     in this funtion we transform the data from the coordinate system to gps
     """
-    longitd, latitud = transform(inProj,outProj,x,y)
+    latitud, longitd = transform(inProj, outProj, x, y)
     return latitud, longitd
 
-def pythagoras(x, y):
-    return np.sqrt(x**2 + y**2)
+
+def lonlat_to_xy(lon, lat):
+    inProj = Proj("+init=EPSG:4326")
+    outProj = Proj("+init=EPSG:28992")
+    x, y = transform(inProj, outProj, lon, lat)
+    return x, y
+
+
+def pythagoras(a1, b1, a2, b2):
+    return np.sqrt((a1-a2)**2 + (b1-b2)**2)
+
 
 def haversine(lon1, lat1, lon2, lat2):
     """
