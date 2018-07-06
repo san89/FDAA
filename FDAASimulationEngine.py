@@ -394,7 +394,7 @@ class SimulationEngine():
             
             # print(set(station_locations['kazerne'].unique()) - (set(station_locations['kazerne'].unique()) & set(M['inzet_kazerne_naam'].unique())))
             M = station_locations.merge(M, left_on='kazerne', right_on='inzet_kazerne_naam', how = 'inner')
-            M['lon_in'], M['lat_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
+            M['lat_in'], M['lon_in'] = np.vectorize(projections)(M['st_x'], M['st_y'], inProj, outProj)
             M['haversine_distance (Km)'] = np.vectorize(haversine)(M['lon'], M['lat'], M['lon_in'], M['lat_in'])
             
             for date in time_stamps_var:
@@ -465,8 +465,11 @@ class SimulationEngine():
                 This function calculated the mean 
 
             """
-            parameters_on_scene_time = self.merged_log.groupby(['dim_incident_incident_type'], as_index=False)['on scene duration (min)'].mean().dropna()
-            return dict(zip(parameters_on_scene_time['dim_incident_incident_type'], parameters_on_scene_time['on scene duration (min)']))
+            parameters_on_scene_time = self.merged_log.groupby(['dim_incident_incident_type'], as_index=False).agg({
+                'on scene duration (min)':['mean', 'std']}).dropna()
+
+
+            return dict(zip(parameters_on_scene_time['dim_incident_incident_type'], zip(parameters_on_scene_time['on scene duration (min)']['mean'], parameters_on_scene_time['on scene duration (min)']['std'])))
 
         ################################## PARAMETERS ###########################################################
         self.merged_log = pre_process_data(incident_log, deployment_log, station_locations)
@@ -549,7 +552,8 @@ class SimulationEngine():
         building_function = self.demand_locations[incident_location_id].sample_building_function(incident_type)
         priority, vehicles = sample_deployment_requirements(incident_type)
         response_time_target = get_response_time_target(priority, building_function)
-        on_scene_duration = np.random.exponential(self.parameters_on_scene_time[incident_type])
+        on_scene_duration = get_safe_random_value_normal(self.parameters_on_scene_time[incident_type][0], self.parameters_on_scene_time[incident_type][1])
+
 
         return Incident(self.time, incident_type, priority, vehicles, incident_location_id, self.location_dict[incident_location_id], 
                         building_function, response_time_target, on_scene_duration)
